@@ -14,6 +14,8 @@ Architecture:
 import sys
 import logging
 import time
+import threading
+import os
 from io import TextIOWrapper
 from typing import Optional, Tuple, List, Any
 from dataclasses import dataclass
@@ -238,6 +240,28 @@ class AdDetector:
         except:
             return False
     
+    def detect_skip_buttons_advanced(self) -> Optional[Any]:
+        """Enhanced skip button detection with multiple patterns."""
+        patterns = [
+            "//button[contains(@class, 'skip')]",
+            "//button[contains(text(), 'Skip')]", 
+            "//div[contains(@class, 'ad-interrupting')]/button",
+            "//button[@aria-label='Skip ad']",
+            "//yt-button-renderer//button[contains(text(), 'Skip')]"
+        ]
+        
+        for pattern in patterns:
+            try:
+                buttons = self.driver.find_elements(By.XPATH, pattern)
+                if buttons:
+                    # Return first visible and clickable button
+                    for button in buttons:
+                        if button.is_displayed() and button.is_enabled():
+                            return button
+            except:
+                continue
+        return None
+    
     def is_ad_present(self) -> bool:
         """Comprehensive ad detection using all methods."""
         return (
@@ -314,6 +338,26 @@ class SkipButton:
         except:
             return None, None
     
+    def _find_via_advanced_patterns(self) -> Tuple[Optional[Any], Optional[str]]:
+        """Find skip button using advanced multi-pattern detection."""
+        patterns = [
+            "//button[contains(@class, 'skip')]",
+            "//button[contains(text(), 'Skip')]", 
+            "//div[contains(@class, 'ad-interrupting')]/button",
+            "//button[@aria-label='Skip ad']",
+            "//yt-button-renderer//button[contains(text(), 'Skip')]"
+        ]
+        
+        for i, pattern in enumerate(patterns):
+            try:
+                buttons = self.driver.find_elements(By.XPATH, pattern)
+                for button in buttons:
+                    if self._is_visible_and_clickable(button):
+                        return button, f"Advanced-{i+1}"
+            except:
+                continue
+        return None, None
+    
     def find(self) -> Tuple[Optional[Any], Optional[str]]:
         """Find skip button using multiple methods in order."""
         methods = [
@@ -321,6 +365,7 @@ class SkipButton:
             self._find_via_css,
             self._find_via_webdriver_wait,
             self._find_via_javascript,
+            self._find_via_advanced_patterns,
         ]
         
         for method in methods:
@@ -449,6 +494,9 @@ class YouTubeAdSkipper:
         self._skipper: Optional[SkipButton] = None
         self._player: Optional[VideoPlayer] = None
         
+        # Kill functionality
+        self.stop_monitoring = False
+        
         self.logger.info("[INIT] YouTube Ad Skipper initialized")
     
     @property
@@ -549,7 +597,7 @@ class YouTubeAdSkipper:
         monitoring_duration = self.config.default_monitor_duration
         
         try:
-            while time.time() - start_time < (monitoring_duration + self.config.monitoring_loop_buffer_seconds):
+            while time.time() - start_time < (monitoring_duration + self.config.monitoring_loop_buffer_seconds) and not self.stop_monitoring:
                 try:
                     # Get video state
                     duration, current_time, playback_rate = self.player.get_playback_info()
@@ -616,7 +664,46 @@ class YouTubeAdSkipper:
         finally:
             self.logger.info("[STOP] Ad monitoring stopped")
     
-    def print_summary(self) -> None:
+    def handle_multiple_urls(self, urls: List[str]) -> Optional[str]:
+        """Handle multiple URLs by opening in tabs and letting user choose."""
+        if not self.driver:
+            self.setup_driver()
+        
+        # Open first URL in current tab
+        self.driver.get(urls[0])
+        time.sleep(self.config.page_load_timeout)
+        
+        # Open others in new tabs
+        for url in urls[1:]:
+            self.driver.execute_script(f"window.open('{url}', '_blank');")
+            time.sleep(1)
+        
+        # Get window handles
+        handles = self.driver.window_handles
+        print(f"\nOpened {len(handles)} tabs:")
+        for i, handle in enumerate(handles):
+            self.driver.switch_to.window(handle)
+            title = self.driver.title or f"Tab {i+1}"
+            print(f"{i+1}. {title}")
+        
+        print("\nWARNING: Please watch only ONE video at a time. Playing multiple may interfere with ad skipping.")
+        
+        while True:
+            try:
+                choice = int(input(f"\nChoose which tab to monitor (1-{len(handles)}): ").strip())
+                if 1 <= choice <= len(handles):
+                    selected_handle = handles[choice - 1]
+                    self.driver.switch_to.window(selected_handle)
+                    current_url = self.driver.current_url
+                    self.logger.info(f"[SELECTED] Monitoring tab: {current_url}")
+                    self.detector.inject_monitor()
+                    return current_url
+                else:
+                    print("Invalid choice.")
+            except ValueError:
+                print("Please enter a number.")
+        
+        return None
         """Print session statistics."""
         self.logger.info("=" * 50)
         self.logger.info("SESSION SUMMARY")
@@ -639,33 +726,86 @@ class YouTubeAdSkipper:
     def run(self, video_url: str = None) -> None:
         """Main execution flow."""
         try:
-            if not video_url:
-                print("\n" + "=" * 60)
-                print("YOUTUBE AD SKIPPER")
-                print("=" * 60)
-                print("\nOptions:")
-                print("1. Enter custom YouTube URL")
-                print("2. Exit")
-                print("-" * 60)
+            while True:  # Loop to allow restarting with new URL
+                if not video_url:
+                    print("\n" + "=" * 60)
+                    print("YOUTUBE AD SKIPPER")
+                    print("=" * 60)
+                    print("\nOptions:")
+                    print("1. Enter single YouTube URL")
+                    print("2. Enter multiple YouTube URLs (up to 3)")
+                    print("3. Exit")
+                    print("-" * 60)
 
-                choice = input("\nSelect option (1-2): ").strip()
+                    choice = input("\nSelect option (1-3): ").strip()
 
-                if choice == "1":
-                    video_url = input("Enter YouTube URL: ").strip()
-                    if not video_url:
-                        self.logger.info("[EXIT] No URL provided")
+                    if choice == "1":
+                        video_url = input("Enter YouTube URL: ").strip()
+                        if not video_url:
+                            self.logger.info("[EXIT] No URL provided")
+                            continue
+                    elif choice == "2":
+                        urls = []
+                        for i in range(3):
+                            url = input(f"Enter YouTube URL {i+1} (or press Enter to skip): ").strip()
+                            if url:
+                                urls.append(url)
+                            else:
+                                break
+                        if not urls:
+                            self.logger.info("[EXIT] No URLs provided")
+                            continue
+                        video_url = self.handle_multiple_urls(urls)
+                        if not video_url:
+                            continue
+                    elif choice == "3":
+                        self.logger.info("[EXIT] Exiting...")
                         return
-                else:
-                    self.logger.info("[EXIT] Exiting...")
-                    return
+                    else:
+                        print("Invalid choice. Try again.")
+                        continue
 
-            self.setup_driver()
-            self.load_video(video_url)
-            self.monitor_and_skip()
-            self.print_summary()
+                self.setup_driver()
+                self.load_video(video_url)
+                # Reset stop flag
+                self.stop_monitoring = False
+                # Run monitoring in thread
+                monitor_thread = threading.Thread(target=self.monitor_and_skip)
+                monitor_thread.start()
+                # Wait for thread or user input
+                print("Monitoring started. Type 'kill' to stop and choose new URL, or wait for video to end.")
+                while monitor_thread.is_alive():
+                    try:
+                        import select
+                        if sys.platform == "win32":
+                            # On Windows, use msvcrt for non-blocking input
+                            import msvcrt
+                            if msvcrt.kbhit():
+                                cmd = input().strip().lower()
+                                if cmd == 'kill':
+                                    self.stop_monitoring = True
+                                    monitor_thread.join(timeout=5)
+                                    print("Monitoring stopped. You can now choose a new URL.")
+                                    break
+                        else:
+                            # Unix-like
+                            import select
+                            if select.select([sys.stdin], [], [], 1)[0]:
+                                cmd = input().strip().lower()
+                                if cmd == 'kill':
+                                    self.stop_monitoring = True
+                                    monitor_thread.join(timeout=5)
+                                    print("Monitoring stopped. You can now choose a new URL.")
+                                    break
+                    except:
+                        pass
+                    time.sleep(1)
+                self.print_summary()
+                video_url = None  # Reset for next iteration
         
         except KeyboardInterrupt:
             self.logger.info("[STOP] Interrupted by user")
+            self.stop_monitoring = True
         except Exception as e:
             self.logger.error(f"[ERROR] Fatal error: {e}")
         finally:
@@ -683,12 +823,21 @@ class YouTubeAdSkipper:
 
 def main():
     """Entry point."""
+    # Save PID for kill script
+    with open("youtube_ad_skipper.pid", "w") as f:
+        f.write(str(os.getpid()))
+    
     skipper = YouTubeAdSkipper(
         log_file="youtube_ad_skipper.log",
         headless=False,
         debug=True
     )
-    skipper.run()
+    try:
+        skipper.run()
+    finally:
+        # Clean up PID file
+        if os.path.exists("youtube_ad_skipper.pid"):
+            os.remove("youtube_ad_skipper.pid")
 
 
 if __name__ == "__main__":
