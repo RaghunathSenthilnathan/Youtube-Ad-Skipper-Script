@@ -218,5 +218,4 @@ project/
 **Last Updated**: 2026-04-03
 **Framework Status**: Active and Evolving
 
-**Note**: This framework is designed to be self-improving. Update this document as new learnings and methodologies are discovered.</content>
-<parameter name="filePath">c:\Users\1000063700\OneDrive - Hexaware Technologies\Documents\React Projects\Youtube-Adskip\.github\agents\learning-framework.agent.md
+**Note**: This framework is designed to be self-improving. Update this document as new learnings and methodologies are discovered.
